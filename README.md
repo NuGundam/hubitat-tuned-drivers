@@ -58,10 +58,20 @@ To install: Hubitat → Drivers code → New driver → Import, and paste the ra
   just crossed, then drifts toward the reading with the chosen time constant. The unsmoothed
   reading is kept in `temperatureRaw`.
 
-### Tuya Zigbee Metering Plug — 2.1.1 + energy fix
+### Tuya Zigbee Metering Plug — v2.1.1-t1
 - Energy (cluster 0x0702 attr 0x0000, UINT48) is parsed as a 64-bit value. Third Reality plugs
   count lifetime energy in watt-seconds; once the counter passes 2^31 (≈ 597 kWh) the original
   32-bit parse threw on every report and energy stayed at 0.
+- **Power/amperage throttle.** The Third Reality 3RSP02028BZ accepts a 30 s minimum reporting
+  interval in Configure Reporting and then keeps pushing 0x0B04 readings every ~5 s anyway, so a
+  busy load floods the hub and Home Assistant. New preferences:
+  - `Power/Amperage update throttle` (Off / 10 s / 30 s / 1 min / 2 min / 5 min, default 30 s):
+    at most one power and one amperage event per interval. The latest held-back value is always
+    sent when the interval ends, so the attribute never goes stale.
+  - `Throttle bypass` (W, default 50): a power change at least this large is sent immediately.
+    Amperage uses the same bypass converted at the present voltage.
+- Amperage reportable change: the setting is in mA, but it was multiplied by the A→raw divisor,
+  so "50 mA" was sent to the device as 50 A. It is now sent in raw units.
 
 ## Notes
 - Hubitat's sandbox does not allow one `@Field static` to reference another in its initializer;

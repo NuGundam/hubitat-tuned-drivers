@@ -73,6 +73,8 @@
  *  ver. 2.0.4 2026-08-07 kkossev - minor bug fixes
  *  ver. 2.1.0 2026-08-29 kkossev - added Tuya multi-channel meter support (SDM02T, SPM02); fixed Tuya DP routing and ping RTT; bug fixes
  *  ver. 2.1.1 2026-08-29 kkossev - fixed 2.1.0 bug: null device NPE in getTuyaMultiChannelProfile() on save; added unverified SPM01V2.5 _TZE284_iwn0gpzz support
+ *  ver. 2.1.1-t1 2026-10-07 (tuned fork) - energy (0x0702 UINT48) parsed as 64-bit (Third Reality lifetime Ws counter overflowed int);
+ *                                 power/amperage throttle for plugs that ignore the minimum reporting interval; amperage reportable change sent in raw units, not x1000
  *
  *                                 TODO: update first post w/ TS0001 _TZ3000_kqvb5akv
  *                                 TODO: add toggle() command
@@ -94,7 +96,7 @@ import groovy.transform.Field
 import hubitat.zigbee.zcl.DataType
 import groovy.transform.CompileStatic
 
-static String version() { '2.1.1' }
+static String version() { '2.1.1-t1' }
 static String timeStamp() { '2026/08/29 05:55 PM' }
 
 @Field static final Boolean _DEBUG = false
@@ -313,6 +315,8 @@ metadata {
             if (reportPower?.value == true) {
                 input(name: 'powerThreshold', type: 'number', title: '<b>Power minimum change to be reported</b>, W', description: 'The minimum Power change that will trigger reporting.', range: '1..10000', defaultValue: 1)
             }
+            input(name: 'reportThrottle', type: 'enum', title: '<b>Power/Amperage update throttle</b>', options: ReportThrottleOpts.options, defaultValue: ReportThrottleOpts.defaultValue, description: '<i>At most one power and one amperage update per interval, for plugs that report every few seconds regardless of the reporting settings. The latest value is always sent when the interval ends.</i>')
+            input(name: 'reportThrottleBypass', type: 'number', title: '<b>Throttle bypass</b>, W', description: '<i>A power change of at least this much is sent immediately, even inside the throttle interval.</i>', range: '1..10000', defaultValue: DEFAULT_THROTTLE_BYPASS_W)
             if (!isFrientEnergyMonitor()) {
                 input(name: 'reportAmperage', type: 'bool', title: '<b>Amperage Reporting Off or On</b>', description: '(Disable reporting (Off) when not desired)', defaultValue: true)
                 if (reportAmperage?.value == true) {
@@ -373,6 +377,12 @@ metadata {
 @Field static final String POWER_FACTOR = 'PowerFactor'
 
 // "energyMode"
+@Field static final Map ReportThrottleOpts = [            // tuned fork: seconds
+    defaultValue: 30,
+    options     : [0: 'Off', 10: '10 seconds', 30: '30 seconds', 60: '1 minute', 120: '2 minutes', 300: '5 minutes']
+]
+@Field static final int DEFAULT_THROTTLE_BYPASS_W = 50
+
 @Field static final Map energyModeOptions = [
     'DISABLED':    'Disabled (Energy and costs will not be reported)',
     'POLLED':      "Enabled  (Energy is reported by polling the plug [most of Tuya's models])",
@@ -881,6 +891,63 @@ void powerFactorEvent(pf, boolean isDigital=false) {
     }
 }
 
+/*
+ * -----------------------------------------------------------------------------
+ * Power / amperage throttle (tuned fork)
+ * -----------------------------------------------------------------------------
+ * Some plugs (Third Reality 3RSP02028BZ) push 0x0B04 readings every ~5 s no matter what minimum reporting interval
+ * they accept in Configure Reporting, so a busy load floods the hub and Home Assistant. The throttle lets at most one
+ * power and one amperage event through per interval. A change of at least the bypass amount is sent at once, and the
+ * latest held-back value is always sent when the interval ends, so the attribute never goes stale.
+*/
+private static BigDecimal throttleBD(final Object v) {
+    try { return v == null ? 0.0G : new BigDecimal(v.toString()) } catch (e) { return 0.0G }
+}
+
+private int getThrottleSecs() {
+    final Object v = settings?.reportThrottle
+    return v == null ? (ReportThrottleOpts.defaultValue as int) : (v as String).toInteger()
+}
+
+private BigDecimal getThrottleBypassWatts() {
+    return throttleBD(settings?.reportThrottleBypass ?: DEFAULT_THROTTLE_BYPASS_W)
+}
+
+// returns true when the event may be sent now; otherwise holds it and schedules a flush
+private boolean throttlePasses(final String name, final Map map, final BigDecimal value, final BigDecimal lastSent, final BigDecimal bypass, final boolean isDigital) {
+    final int secs = getThrottleSecs()
+    if (secs <= 0 || isDigital || state.isRefreshRequest == true) { return true }
+    if (state.throttle == null) { state.throttle = [:] }
+    final long nowMs = now()
+    final long last = (state.throttle["${name}Time"] ?: 0L) as long
+    final long elapsedMs = nowMs - last
+    if (elapsedMs >= secs * 1000L || (value - lastSent).abs() >= bypass) {
+        state.throttle["${name}Time"] = nowMs
+        state.throttle.remove("${name}Pending")
+        unschedule("flushThrottled${name.capitalize()}")
+        return true
+    }
+    state.throttle["${name}Pending"] = map
+    final int wait = Math.max(1, (int) Math.ceil((secs * 1000L - elapsedMs) / 1000.0d))
+    runIn(wait, "flushThrottled${name.capitalize()}", [overwrite: true])
+    logDebug "throttled ${name} ${map.value} ${map.unit} (sending the latest value in ${wait} s)"
+    return false
+}
+
+private void flushThrottled(final String name) {
+    final Map map = state.throttle?."${name}Pending" as Map
+    if (map == null) { return }
+    state.throttle.remove("${name}Pending")
+    state.throttle["${name}Time"] = now()
+    if (device.currentValue(name, true)?.toString() == map.value?.toString()) { return }
+    logInfo "${map.descriptionText} (throttled)"
+    sendEvent(map)
+    runIn(1, formatAttrib, [overwrite: true])
+}
+
+void flushThrottledPower()    { flushThrottled('power') }
+void flushThrottledAmperage() { flushThrottled('amperage') }
+
 /* groovylint-disable-next-line NoDef */
 void powerEvent(power, boolean isDigital=false) {
     if (settings.reportPower != true) {
@@ -903,6 +970,7 @@ void powerEvent(power, boolean isDigital=false) {
     }
     if ((Math.abs((power as int) - (lastPower as int)) >= (powerThreshold as int)) || optimizations == false || state.isRefreshRequest == true) {
         if (settings?.reportPower == true) {
+            if (!throttlePasses('power', map, throttleBD(power), throttleBD(lastPower), getThrottleBypassWatts(), isDigital)) { return }
             logInfo "${map.descriptionText}"
             sendEvent(map)
             runIn(1, formatAttrib, [overwrite: true])
@@ -930,6 +998,8 @@ void amperageEvent(amperage, boolean isDigital=false) {
     def lastAmperage = device.currentValue('amperage', true) ?: 0.0
     if ((Math.abs((amperage * 1000 as int) - (lastAmperage * 1000 as int)) >= (amperageThreshold as int)) || optimizations == false || state.isRefreshRequest == true) {
         if (settings?.reportAmperage == true) {
+            final BigDecimal volts = [throttleBD(device.currentValue('voltage', true) ?: 120), 100.0G].max()
+            if (!throttlePasses('amperage', map, throttleBD(amperage), throttleBD(lastAmperage), getThrottleBypassWatts() / volts, isDigital)) { return }
             logInfo "${map.descriptionText}"
             sendEvent(map)
             runIn(1, formatAttrib, [overwrite: true])
@@ -3288,7 +3358,7 @@ List<String> configureReporting(String operation, String measurement,  String mi
             break
         case AMPERAGE :    // RMS Current default delta = 100 mA = 0.1 A
             if (operation == 'Write') {
-                cmds += zigbee.configureReporting(0x0B04, 0x0508,  DataType.UINT16, intMinTime, intMaxTime, (intDelta * getCurrentDiv() as int))
+                cmds += zigbee.configureReporting(0x0B04, 0x0508,  DataType.UINT16, intMinTime, intMaxTime, Math.max(1, (intDelta * getCurrentDiv() / 1000) as int))    // tuned fork: delta is mA
             }
             else if (operation == 'Disable') {
                 cmds += zigbee.configureReporting(0x0B04, 0x0508,  DataType.UINT16, 0xFFFF, 0xFFFF, 0xFFFF)    // disable amperage automatic reporting - tested with Frient
