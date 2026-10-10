@@ -15,6 +15,7 @@ To install: Hubitat → Drivers code → New driver → Import, and paste the ra
 | IKEA PARASOLL E2013 Contact | [`drivers/ikea-parasoll-e2013-contact-tuned.groovy`](drivers/ikea-parasoll-e2013-contact-tuned.groovy) | community PARASOLL driver |
 | IKEA VINDSTYRKA Air Quality Monitor | [`drivers/ikea-vindstyrka-air-quality-tuned.groovy`](drivers/ikea-vindstyrka-air-quality-tuned.groovy) | kkossev VINDSTYRKA 3.2.0 |
 | Tuya Zigbee Metering Plug (also Third Reality 3RSP02028BZ) | [`drivers/tuya-zigbee-metering-plug-tuned.groovy`](drivers/tuya-zigbee-metering-plug-tuned.groovy) | kkossev Tuya Zigbee Metering Plug 2.1.1 |
+| Third Reality Vibration Sensor 3RVS01031Z (knock sensor) | [`drivers/thirdreality-vibration-3rvs01031z-tuned.groovy`](drivers/thirdreality-vibration-3rvs01031z-tuned.groovy) | new driver (replaces the built-in one) |
 
 ## What changed
 
@@ -72,6 +73,20 @@ To install: Hubitat → Drivers code → New driver → Import, and paste the ra
     Amperage uses the same bypass converted at the present voltage.
 - Amperage reportable change: the setting is in mA, but it was multiplied by the A→raw divisor,
   so "50 mA" was sent to the device as 50 A. It is now sent in raw units.
+
+### Third Reality Vibration Sensor 3RVS01031Z — v1.0.0 (new)
+Written from scratch to replace Hubitat's built-in driver, which reports only active/inactive and
+battery, discards the X/Y/Z data in every report, and declares a ContactSensor it never sets.
+- **Knock detection:** `Hits for a knock` (default 2) inside `Knock window` (default 4 s) fires
+  button 1 `pushed` once per burst, with `knockCount`. A dashboard `push` sends a test knock.
+- **Strength filter:** `Minimum vibration level` ignores weak hits. The level is the larger of how
+  far the sample is from 1 g and how far it moved from the previous sample in the burst (≈1000 = 1 g).
+  On a front door, visitor knocks measured 462–1410 and a light bump's first hit 200, so 300 plus
+  2 hits separates them.
+- **Hold time:** `acceleration` stays active for the chosen time after the last hit (default 30 s;
+  the sensor itself clears after ~6 s), so one knocking burst is one active/inactive cycle.
+- `vibrationLevel`, optional `threeAxis`, battery % and voltage. Configure binds 0x0001 and 0xFFF1 and
+  sets hourly battery reporting.
 
 ## Notes
 - Hubitat's sandbox does not allow one `@Field static` to reference another in its initializer;
