@@ -16,6 +16,7 @@ To install: Hubitat → Drivers code → New driver → Import, and paste the ra
 | IKEA VINDSTYRKA Air Quality Monitor | [`drivers/ikea-vindstyrka-air-quality-tuned.groovy`](drivers/ikea-vindstyrka-air-quality-tuned.groovy) | kkossev VINDSTYRKA 3.2.0 |
 | Tuya Zigbee Metering Plug (also Third Reality 3RSP02028BZ) | [`drivers/tuya-zigbee-metering-plug-tuned.groovy`](drivers/tuya-zigbee-metering-plug-tuned.groovy) | kkossev Tuya Zigbee Metering Plug 2.1.1 |
 | Third Reality Vibration Sensor 3RVS01031Z (knock sensor) | [`drivers/thirdreality-vibration-3rvs01031z-tuned.groovy`](drivers/thirdreality-vibration-3rvs01031z-tuned.groovy) | new driver (replaces the built-in one) |
+| GE/Jasco Z-Wave Plus Motion Switch 26931 | [`drivers/ge-jasco-zwave-plus-motion-switch-tuned.groovy`](drivers/ge-jasco-zwave-plus-motion-switch-tuned.groovy) | Botched1 GE Z-Wave Plus Motion Switch 2.4.3 |
 
 ## What changed
 
@@ -87,6 +88,19 @@ battery, discards the X/Y/Z data in every report, and declares a ContactSensor i
   the sensor itself clears after ~6 s), so one knocking burst is one active/inactive cycle.
 - `vibrationLevel`, optional `threeAxis`, battery % and voltage. Configure binds 0x0001 and 0xFFF1 and
   sets hourly battery reporting.
+
+### GE/Jasco Z-Wave Plus Motion Switch 26931 — v2.4.3-t1
+Built for running the switch in **Manual** mode and letting the hub / Home Assistant decide when the
+light goes on and off (per-room timeouts, ignoring HVAC airflow, respecting a manual off).
+- Operating mode and light timeout are preferences again, sent on Save; Motion reset time (param 15)
+  and sensitivity (param 13) exposed. A 10 s reset gives an automation the most precise motion picture.
+- `lastSwitchSource` attribute: `physical` for a press at the wall, `digital` for a hub command or read,
+  so an automation can avoid turning a light straight back on after someone switched it off.
+- Double-tap up / down (association group 3 Basic Set) reported as `doubleTapped` 1 / 2.
+- 1-byte parameters are sent signed. Light timeout "disabled" (255) is removed: the 26931 firmware
+  rejects it and stores 0 = 5 seconds.
+- Fixes from upstream: `setLightTimeout('15 minutes')` reported 5 minutes, '5 minutes' reported
+  nothing, `updated()` checked a non-existent `txtEnable`, unconditional debug logs, debug default on.
 
 ## Notes
 - Hubitat's sandbox does not allow one `@Field static` to reference another in its initializer;
