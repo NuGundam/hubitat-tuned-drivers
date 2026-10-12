@@ -29,7 +29,8 @@
  *      and the hub / Home Assistant does the motion-to-light logic.
  *    - New attribute lastSwitchSource (physical / digital): a press at the wall is "physical", a hub command is
  *      "digital", so an automation can respect a manual off.
- *    - Double-tap up / down (association group 3 Basic Set) are reported as doubleTapped button 1 / 2.
+ *    - Double-tap up / down reported as doubleTapped button 1 / 2 (two presses in the same direction within 2 s;
+ *      the switch sends a group 3 Basic Set on every press, not only on a double-tap).
  *    - Light timeout 'disabled' removed: the 26931 firmware rejects 255 and stores 0 = 5 seconds (use Manual mode instead).
  *    - Fixes: 1-byte parameters are sent signed; setLightTimeout('15 minutes') reported '5 minutes'; '5 minutes' reported nothing; updated() checked a
  *      non-existent txtEnable; unconditional debug logs; debug logging now defaults off and turns itself off.
@@ -41,7 +42,8 @@ import groovy.transform.Field
 
 @Field static final String VERSION = '2.4.3-t1'
 @Field static final Map CC_VERSIONS = [0x20: 1, 0x25: 1, 0x56: 1, 0x70: 2, 0x71: 3, 0x72: 2, 0x85: 2, 0x86: 1]
-@Field static final long DIGITAL_WINDOW_MS = 4000L    // a switch report this soon after a hub command is the result of that command
+@Field static final long DIGITAL_WINDOW_MS = 4000L
+@Field static final long DOUBLE_TAP_MS = 2000L       // two presses in the same direction this close together = double-tap    // a switch report this soon after a hub command is the result of that command
 
 @Field static final Map LIGHT_TIMEOUT_OPTS = ['0': '5 seconds', '1': '1 minute', '5': '5 minutes (default)', '15': '15 minutes', '30': '30 minutes']    // 255 'disabled' is rejected by 26931 firmware (stored as 0 = 5 s)
 @Field static final Map MODE_OPTS = ['1': 'Manual', '2': 'Vacancy', '3': 'Occupancy (default)']
@@ -130,12 +132,23 @@ void zwaveEvent(hubitat.zwave.commands.basicv1.BasicReport cmd) {
     logDebug "basic report ${cmd}"
 }
 
-// Double-tap: the switch sends Basic Set to association group 3 (the hub is added to it in configure())
+// The 26931 sends a Basic Set to association group 3 on EVERY paddle press (seen 2026-10-11: one press down
+// produced one Basic Set 0 together with the switch report), so a double-tap is two presses in the same
+// direction within DOUBLE_TAP_MS.
 void zwaveEvent(hubitat.zwave.commands.basicv1.BasicSet cmd) {
     int btn = cmd.value ? 1 : 2
-    sendEvent(name: 'doubleTapped', value: btn, isStateChange: true, type: 'physical',
-            descriptionText: "${device.displayName} double-tapped ${btn == 1 ? 'up' : 'down'} (button ${btn})")
-    logInfo "double-tapped ${btn == 1 ? 'up' : 'down'}"
+    long nowMs = now()
+    long last = (state."lastPress${btn}" ?: 0L) as long
+    state."lastPress${btn}" = nowMs
+    if (nowMs - last <= DOUBLE_TAP_MS) {
+        state.remove("lastPress${btn}")
+        sendEvent(name: 'doubleTapped', value: btn, isStateChange: true, type: 'physical',
+                descriptionText: "${device.displayName} double-tapped ${btn == 1 ? 'up' : 'down'} (button ${btn})")
+        logInfo "double-tapped ${btn == 1 ? 'up' : 'down'}"
+    }
+    else {
+        logDebug "paddle ${btn == 1 ? 'up' : 'down'} pressed"
+    }
 }
 
 void zwaveEvent(hubitat.zwave.commands.notificationv3.NotificationReport cmd) {

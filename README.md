@@ -96,7 +96,8 @@ light goes on and off (per-room timeouts, ignoring HVAC airflow, respecting a ma
   and sensitivity (param 13) exposed. A 10 s reset gives an automation the most precise motion picture.
 - `lastSwitchSource` attribute: `physical` for a press at the wall, `digital` for a hub command or read,
   so an automation can avoid turning a light straight back on after someone switched it off.
-- Double-tap up / down (association group 3 Basic Set) reported as `doubleTapped` 1 / 2.
+- Double-tap up / down reported as `doubleTapped` 1 / 2: two presses in the same direction within 2 s.
+  (The 26931 sends a group 3 Basic Set on every paddle press, not only on a double-tap.)
 - 1-byte parameters are sent signed. Light timeout "disabled" (255) is removed: the 26931 firmware
   rejects it and stores 0 = 5 seconds.
 - Fixes from upstream: `setLightTimeout('15 minutes')` reported 5 minutes, '5 minutes' reported
