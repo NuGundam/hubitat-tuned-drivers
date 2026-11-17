@@ -48,7 +48,7 @@ To install: Hubitat → Drivers code → New driver → Import, and paste the ra
 - Unknown bindings are kept and warned about rather than removed; the hub's own binding is skipped.
 - ZDP responses ignored; reportable-change encoding fix; default log level Info.
 
-### IKEA VINDSTYRKA — v3.2.0-t3
+### IKEA VINDSTYRKA — v3.2.0-t4
 - PM2.5: negative-value guard and proper rounding; refresh covers the VINDSTYRKA; VOC duplicate
   check fixed; `logWarn` respects the logging switches.
 - Humidity hysteresis: the sensor reports whole percentages, so a reversal must exceed two steps
@@ -59,6 +59,9 @@ To install: Hubitat → Drivers code → New driver → Import, and paste the ra
   estimates a 0.1 °C value: when the reading changes the estimate snaps to the half-degree boundary
   just crossed, then drifts toward the reading with the chosen time constant. The unsmoothed
   reading is kept in `temperatureRaw`.
+- t4: when a room hovers at a degree boundary (the reading flips back and forth as the HVAC cycles),
+  the time spent on each side is learned and the estimate goes out and back to the boundary over that
+  time, instead of drifting to the middle and jumping back at the next flip (no saw-tooth).
 
 ### Tuya Zigbee Metering Plug — v2.1.1-t1
 - Energy (cluster 0x0702 attr 0x0000, UINT48) is parsed as a 64-bit value. Third Reality plugs

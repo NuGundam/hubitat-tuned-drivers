@@ -23,6 +23,7 @@
  * ver. 3.2.0-t1 2026-10-04 (tuned fork)
  * ver. 3.2.0-t2 2026-10-05 (tuned fork) - temperature reportable change 1.0 -> 0.1 C; read 0x0402 Tolerance on refresh; log raw temperature
  * ver. 3.2.0-t3 2026-10-05 (tuned fork) - temperature smoothing: VINDSTYRKA reports whole degrees C only, estimate a 0.1 C value (boundary snap + drift); raw reading kept in temperatureRaw
+ * ver. 3.2.0-t4 2026-11-17 (tuned fork) - temperature smoothing: a room hovering at a degree boundary no longer draws a saw-tooth; the estimate goes out and back over the learned dwell time
  *                                 - PM2.5: a reading of 0 is valid (was ignored, so clean air stuck at 1); round instead of truncate
  *                                 - Refresh now also reads PM2.5 and VOC index on VINDSTYRKA
  *                                 - VOC duplicate check uses sensirionVOCindex on VINDSTYRKA
@@ -34,7 +35,7 @@
  *                                   TODO: 
  */
 
-static String version() { "3.2.0-t3" }
+static String version() { "3.2.0-t4" }
 static String timeStamp() {"2025/09/28 7:58 PM"}
 
 @Field static final boolean _DEBUG = false
@@ -112,6 +113,8 @@ boolean isAqaraTVOC()  { return (device?.getDataValue('model') ?: 'n/a') in ['lu
     defaultValue: 60,
     options     : [0: 'Disabled', 10: 'Every 10 seconds', 30: 'Every 30 seconds', 60: 'Every 1 minute', 300: 'Every 5 minutes', 900: 'Every 15 minutes', 3600: 'Every 1 hour']
 ]
+@Field static final int TEMP_HOVER_MAX_SECS = 3600          // tuned fork: a flip back within this time counts as hovering at a boundary
+@Field static final int TEMP_HOVER_MIN_SECS = 120           // tuned fork: shorter learned dwells are not worth drawing
 @Field static final Map TemperatureSmoothingOpts = [        // tuned fork: drift time constant, seconds
     defaultValue: 600,
     options     : [0: 'Off (sensor value, whole degrees)', 300: '5 minutes', 600: '10 minutes', 1200: '20 minutes', 1800: '30 minutes']
@@ -310,6 +313,7 @@ void customUpdated() {
     if (getTemperatureSmoothingSecs() <= 0) {
         device.deleteCurrentState('temperatureRaw')
         state.remove('tempEmaC'); state.remove('tempEmaTime'); state.remove('tempRawC')
+        state.remove('tempCrossC'); state.remove('tempCrossDir'); state.remove('tempCrossTime'); state.remove('tempDwell')
     }
     else if (state.tempRawC != null) {
         runIn(60, 'smoothTemperatureTick', [overwrite: true])    // updated() unschedules everything - re-arm the drift
@@ -327,6 +331,9 @@ void customUpdated() {
  *    the new value, so the estimate snaps to that boundary (22 -> 23 means about 22.5 C right now);
  *  - between reports the estimate drifts toward the current reading with the configured time constant, so a steady
  *    room settles on the sensor value and a room hovering near a boundary settles near x.5.
+ *  - when the reading flips back and forth across one boundary (HVAC cycling), the time spent on each side is
+ *    learned and the estimate is drawn out and back to the boundary over that time instead of drifting to the
+ *    middle and jumping back at the next flip.
  * The unsmoothed reading is kept in the 'temperatureRaw' attribute.
 */
 private int getTemperatureSmoothingSecs() {
@@ -342,17 +349,38 @@ void customTemperatureReport(final BigDecimal tempC) {
     sendTemperatureRawEvent(tempC)
     final BigDecimal prevRaw = state.tempRawC != null ? safeToBigDecimal(state.tempRawC) : null
     state.tempRawC = tempC
+    final long nowMs = now()
     if (prevRaw == null || state.tempEmaC == null) {
         state.tempEmaC = tempC                  // first report - nothing better to start from
-        state.tempEmaTime = now()
+        state.tempEmaTime = nowMs
     }
     else if (tempC != prevRaw) {
-        final BigDecimal boundary = tempC - (tempC > prevRaw ? 0.5 : -0.5)
-        logDebug "temperature reading changed ${prevRaw} -> ${tempC} C, estimate snapped to the ${boundary} C boundary"
+        final int dir = tempC > prevRaw ? 1 : -1
+        final BigDecimal boundary = tempC - 0.5 * dir
+        learnTemperatureDwell(dir, boundary, nowMs)
+        logDebug "temperature reading changed ${prevRaw} -> ${tempC} C, estimate snapped to the ${boundary} C boundary (learned dwell ${state.tempDwell ?: 'none'})"
+        state.tempCrossC = boundary
+        state.tempCrossDir = dir
+        state.tempCrossTime = nowMs
         state.tempEmaC = boundary
-        state.tempEmaTime = now()
+        state.tempEmaTime = nowMs
     }
     smoothTemperatureTick()
+}
+
+// A crossing that undoes the previous one (22 -> 23, then 23 -> 22) means the room is hovering at that boundary.
+// Remember how long it stayed on the far side, per direction, so the next excursion can be drawn out and back.
+private void learnTemperatureDwell(final int dir, final BigDecimal boundary, final long nowMs) {
+    final int prevDir = (state.tempCrossDir ?: 0) as int
+    final double secs = (nowMs - ((state.tempCrossTime ?: 0L) as long)) / 1000.0d
+    final boolean reversal = prevDir == -dir && state.tempCrossC != null && secs <= TEMP_HOVER_MAX_SECS &&
+        (safeToBigDecimal(state.tempCrossC) - boundary).abs() < 0.01
+    if (!reversal) { state.remove('tempDwell'); return }       // a trend or a long stay - not hovering
+    final Map dwell = (state.tempDwell ?: [:]) as Map
+    final String key = prevDir > 0 ? 'up' : 'down'
+    final double old = (dwell[key] ?: 0) as double
+    dwell[key] = Math.round(old > 0 ? (old + secs) / 2.0d : secs) as int
+    state.tempDwell = dwell
 }
 
 void smoothTemperatureTick() {
@@ -361,16 +389,32 @@ void smoothTemperatureTick() {
     final BigDecimal raw = safeToBigDecimal(state.tempRawC)
     BigDecimal ema = safeToBigDecimal(state.tempEmaC)
     final long nowMs = now()
-    final double dt = (nowMs - ((state.tempEmaTime ?: nowMs) as long)) / 1000.0d
-    if (dt > 0) {
-        final BigDecimal alpha = new BigDecimal(1.0d - Math.exp(-dt / tau))
-        ema = (ema + (raw - ema) * alpha).setScale(4, BigDecimal.ROUND_HALF_UP)
+    boolean hover = false
+    final int dir = (state.tempCrossDir ?: 0) as int
+    final double expected = dir == 0 ? 0.0d : ((((state.tempDwell ?: [:]) as Map)[dir > 0 ? 'up' : 'down']) ?: 0) as double
+    if (expected >= TEMP_HOVER_MIN_SECS && state.tempCrossC != null) {
+        // hovering at a boundary: go out and come back over the dwell learned from the previous excursions,
+        // so the estimate is back at the boundary when the reading flips again (no saw-tooth jump)
+        final double t = (nowMs - ((state.tempCrossTime ?: nowMs) as long)) / 1000.0d
+        if (t <= expected * 1.25d) {
+            hover = true
+            final double peak = 0.5d * (1.0d - Math.exp(-(expected / 2.0d) / tau))
+            final double tri = Math.max(0.0d, 1.0d - Math.abs(2.0d * t / expected - 1.0d))
+            ema = (safeToBigDecimal(state.tempCrossC) + new BigDecimal(dir * peak * tri)).setScale(4, BigDecimal.ROUND_HALF_UP)
+        }
+    }
+    if (!hover) {
+        final double dt = (nowMs - ((state.tempEmaTime ?: nowMs) as long)) / 1000.0d
+        if (dt > 0) {
+            final BigDecimal alpha = new BigDecimal(1.0d - Math.exp(-dt / tau))
+            ema = (ema + (raw - ema) * alpha).setScale(4, BigDecimal.ROUND_HALF_UP)
+        }
     }
     state.tempEmaC = ema
     state.tempEmaTime = nowMs
-    logDebug "smoothed temperature ${ema} C (sensor ${raw} C, tau ${tau} s)"
+    logDebug "smoothed temperature ${ema} C (sensor ${raw} C, tau ${tau} s${hover ? ', hovering, expected dwell ' + (expected as int) + ' s' : ''})"
     handleTemperatureEvent(ema)
-    if ((raw - ema).abs() >= 0.005) { runIn(60, 'smoothTemperatureTick', [overwrite: true]) }    // keep drifting until settled
+    if (hover || (raw - ema).abs() >= 0.005) { runIn(60, 'smoothTemperatureTick', [overwrite: true]) }    // keep going until settled
 }
 
 private void sendTemperatureRawEvent(final BigDecimal tempC) {
