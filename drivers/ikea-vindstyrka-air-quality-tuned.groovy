@@ -24,6 +24,8 @@
  * ver. 3.2.0-t2 2026-10-05 (tuned fork) - temperature reportable change 1.0 -> 0.1 C; read 0x0402 Tolerance on refresh; log raw temperature
  * ver. 3.2.0-t3 2026-10-05 (tuned fork) - temperature smoothing: VINDSTYRKA reports whole degrees C only, estimate a 0.1 C value (boundary snap + drift); raw reading kept in temperatureRaw
  * ver. 3.2.0-t4 2026-11-17 (tuned fork) - temperature smoothing: a room hovering at a degree boundary no longer draws a saw-tooth; the estimate goes out and back over the learned dwell time
+ * ver. 3.2.0-t5 2026-11-17 (tuned fork) - Configure binds the VOC cluster (0xFC7E) instead of unbinding it, so the sensor keeps pushing VOC on its own and
+ *                                 the VOC index poll can be Disabled (the original unbind left the poll as the only VOC source)
  *                                 - PM2.5: a reading of 0 is valid (was ignored, so clean air stuck at 1); round instead of truncate
  *                                 - Refresh now also reads PM2.5 and VOC index on VINDSTYRKA
  *                                 - VOC duplicate check uses sensirionVOCindex on VINDSTYRKA
@@ -35,7 +37,7 @@
  *                                   TODO: 
  */
 
-static String version() { "3.2.0-t4" }
+static String version() { "3.2.0-t5" }
 static String timeStamp() {"2025/09/28 7:58 PM"}
 
 @Field static final boolean _DEBUG = false
@@ -680,7 +682,9 @@ List<String> customInitializeDevice() {
         cmds += zigbee.configureReporting(zigbee.RELATIVE_HUMIDITY_MEASUREMENT_CLUSTER, 0 /*RALATIVE_HUMIDITY_MEASUREMENT_MEASURED_VALUE_ATTRIBUTE*/, DataType.UINT16, 15, 300, 400/*10/100=0.4%*/)    // 405 - humidity
         cmds += zigbee.configureReporting(0x042a, 0, 0x39, 30, 60, 1)    // 405 - pm2.5
         //cmds += zigbee.configureReporting(0xfc7e, 0, 0x39, 10, 60, 50)     // provides a measurement in the range of 0-500 that correlates with the tVOC trend display on the unit itself.
-        cmds += ["zdo unbind 0x${device.deviceNetworkId} 0x${device.endpointId} 0x01 0xfc7e {${device.zigbeeId}} {}", 'delay 251', ]
+        // tuned fork: bind (not unbind) the VOC cluster - with the binding the sensor pushes the VOC index about once a minute
+        // using its own default reporting, so no polling is needed. The original unbind made the scheduled poll the only VOC source.
+        cmds += ["zdo bind 0x${device.deviceNetworkId} 0x${device.endpointId} 0x01 0xfc7e {${device.zigbeeId}} {}", 'delay 251', ]
     }
     else {
         logWarn 'customInitializeDevice: unsupported device?'
